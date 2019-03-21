@@ -1,0 +1,6 @@
+[run]
+branch = True
+source = networking-ucsm-bm
+
+[report]
+ignore_errors = True
