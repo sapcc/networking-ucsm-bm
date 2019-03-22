@@ -16,13 +16,13 @@
 test_networking-ucsm-bm
 ----------------------------------
 
-Tests for `networking-ucsm-bm` module.
+Tests for `networking_ucsm_bm` module.
 """
 
-from networking-ucsm-bm.tests import base
+from networking_ucsm_bm.tests import base
 
 
-class TestNetworking-ucsm-bm(base.TestCase):
+class TestNetworking_ucsm_bm(base.TestCase):
 
     def test_something(self):
         pass
