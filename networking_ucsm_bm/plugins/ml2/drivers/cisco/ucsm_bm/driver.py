@@ -15,13 +15,15 @@
 
 from bisect import bisect
 
-from networking_ucsm_bm._i18n import _
-from neutron.plugins.ml2.drivers.mech_agent import SimpleAgentMechanismDriverBase
-from neutron_lib import constants as p_const
-from neutron_lib.api.definitions import portbindings
 from oslo_log import log as logging
 
 import networking_ucsm_bm.constants as constants
+from networking_ucsm_bm._i18n import _
+from neutron.db import provisioning_blocks
+from neutron.plugins.ml2.drivers.mech_agent import SimpleAgentMechanismDriverBase
+from neutron_lib import constants as p_const
+from neutron_lib.api.definitions import portbindings
+from neutron_lib.callbacks import resources
 
 LOG = logging.getLogger(__name__)
 
@@ -52,10 +54,10 @@ class CiscoUcsmBareMetalDriver(SimpleAgentMechanismDriverBase):
                       vnic_type)
             return
 
-        agents = context.host_agents(self.agent_type)
+        agents = self._get_agents(context)
         if not agents:
             LOG.warning(_("Port %(pid)s on network %(network)s not bound, "
-                          "no agent registered of tpy %(host)s"),
+                          "no agent registered of tpy %(agent_type)s"),
                         {'pid': context.current['id'],
                          'network': context.network.current['id'],
                          'agent_type': self.agent_type})
@@ -95,6 +97,24 @@ class CiscoUcsmBareMetalDriver(SimpleAgentMechanismDriverBase):
         return SimpleAgentMechanismDriverBase.try_to_bind_segment_for_agent(
             self, context, segment, agent)
 
+    def _insert_provisioning_block(self, context):
+        # we insert a status barrier to prevent the port from transitioning
+        # to active until the agent reports back that the wiring is done
+        port = context.current
+        if not context.host or port['status'] == p_const.PORT_STATUS_ACTIVE:
+            # no point in putting in a block if the status is already ACTIVE
+            return
+        vnic_type = context.current.get(portbindings.VNIC_TYPE,
+                                        portbindings.VNIC_NORMAL)
+        if vnic_type not in self.supported_vnic_types:
+            # we check the VNIC type because there could be multiple agents
+            # on a single host with different VNIC types
+            return
+        if self._get_agents(context):
+            provisioning_blocks.add_provisioning_component(
+                context._plugin_context, port['id'], resources.PORT,
+                provisioning_blocks.L2_AGENT_ENTITY)
+
     def get_allowed_network_types(self, _=None):
         return p_const.TYPE_FLAT, p_const.TYPE_VLAN
 
@@ -107,3 +127,9 @@ class CiscoUcsmBareMetalDriver(SimpleAgentMechanismDriverBase):
                 items.append(item)
 
         return items
+
+    @staticmethod
+    def _get_agents(context):
+        filters = {'agent_type': constants.AGENT_TYPE}
+        return context._plugin.get_agents(context._plugin_context,
+                                            filters)
