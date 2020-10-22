@@ -3,7 +3,7 @@
 # process, which may cause wedges in the gate later.
 
 pbr>=2.0 # Apache-2.0
-UcsSdk<=0.8.2;python_version<'3.0'
+ucsmsdk
 six
 attrs
 oslo_i18n

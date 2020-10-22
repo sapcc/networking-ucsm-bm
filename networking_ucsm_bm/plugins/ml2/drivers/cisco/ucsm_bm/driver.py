@@ -15,15 +15,18 @@
 
 from bisect import bisect
 
+from neutron_lib import constants as p_const
+from neutron_lib.agent import topics
+from neutron_lib.api.definitions import portbindings
+from neutron_lib.callbacks import resources
+from neutron_lib.plugins.ml2 import api
 from oslo_log import log as logging
 
 import networking_ucsm_bm.constants as constants
 from networking_ucsm_bm._i18n import _
 from neutron.db import provisioning_blocks
+from neutron.plugins.ml2 import rpc as ml2_rpc
 from neutron.plugins.ml2.drivers.mech_agent import SimpleAgentMechanismDriverBase
-from neutron_lib import constants as p_const
-from neutron_lib.api.definitions import portbindings
-from neutron_lib.callbacks import resources
 
 LOG = logging.getLogger(__name__)
 
@@ -32,6 +35,7 @@ class CiscoUcsmBareMetalDriver(SimpleAgentMechanismDriverBase):
     def __init__(self):
         vif_details = {portbindings.CAP_PORT_FILTER: False,
                        portbindings.OVS_HYBRID_PLUG: False}
+        self.notifier = ml2_rpc.AgentNotifierApi(topics.AGENT)
 
         super(
             CiscoUcsmBareMetalDriver,
@@ -68,11 +72,27 @@ class CiscoUcsmBareMetalDriver(SimpleAgentMechanismDriverBase):
                     if self.try_to_bind_segment_for_agent(context, segment,
                                                           agent):
                         LOG.debug("Bound using segment: %s", segment)
+                        self._notify_port_updated(context)
                         return
             else:
                 LOG.warning(_("Refusing to bind port %(pid)s to dead agent: "
                               "%(agent)s"),
                             {'pid': context.current['id'], 'agent': agent})
+
+    def _notify_port_updated(self, mech_context):
+        port = mech_context.current
+        segment = mech_context.bottom_bound_segment
+        if not segment:
+            # REVISIT(rkukura): This should notify agent to unplug port
+            network = mech_context.network.current
+            LOG.debug("In _notify_port_updated(), no bound segment for "
+                      "port %(port_id)s on network %(network_id)s",
+                      {'port_id': port['id'], 'network_id': network['id']})
+            return
+        self.notifier.port_update(mech_context._plugin_context, port,
+                                  segment[api.NETWORK_TYPE],
+                                  segment[api.SEGMENTATION_ID],
+                                  segment[api.PHYSICAL_NETWORK])
 
     def try_to_bind_segment_for_agent(self, context, segment, agent):
         mac_address = context.current['mac_address'].lower()

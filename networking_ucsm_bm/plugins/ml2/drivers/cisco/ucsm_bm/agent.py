@@ -13,38 +13,38 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import eventlet
-# oslo_messaging/notify/listener.py documents that monkeypatching is required
-eventlet.monkey_patch()
-
 import ssl
 import sys
-import six
-import oslo_messaging
-import attr
-
 from bisect import insort
 from collections import defaultdict
 from contextlib import contextmanager
+
+import attr
+import oslo_messaging
+import six
+from neutron_lib.agent import topics
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_service import service
-from oslo_utils import importutils
+from ucsmsdk.mometa.vnic.VnicEtherIf import VnicEtherIf
+from ucsmsdk.ucshandle import UcsHandle
 
-from neutron.plugins.ml2.drivers.agent import _common_agent as ca
-from neutron.plugins.ml2.drivers.agent import _agent_manager_base as amb
-from neutron.common import topics
-from neutron.common import config as common_config
-
-from networking_ucsm_bm.plugins.ml2.drivers.cisco.ucsm_bm.config import UcsmBmConfig
-from networking_ucsm_bm.plugins.ml2.drivers.cisco.ucsm_bm import exceptions as cexc
-from networking_ucsm_bm._i18n import _
 from networking_ucsm_bm import constants
+from networking_ucsm_bm._i18n import _
+from networking_ucsm_bm.plugins.ml2.drivers.cisco.ucsm_bm import exceptions as cexc
+from networking_ucsm_bm.plugins.ml2.drivers.cisco.ucsm_bm.config import UcsmBmConfig
+from neutron.common import config as common_config
+from neutron.plugins.ml2.drivers.agent import _agent_manager_base as amb  # noqa
+from neutron.plugins.ml2.drivers.agent import _common_agent as ca  # noqa
 
 try:
     from neutron.common import profiler
 except ImportError:
     profiler = None
+
+import eventlet
+# oslo_messaging/notify/listener.py documents that monkeypatching is required
+eventlet.monkey_patch()
 
 
 ###
@@ -71,48 +71,8 @@ except ImportError:
 #   => We have to change the 'device' field back to a MAC in
 #      (AgentLoop#_get_devices_details_list)
 
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    # Legacy Python that doesn't verify HTTPS certificates by default
-    pass
-else:
-    # Handle target environment that doesn't support HTTPS verification
-    ssl._create_default_https_context = _create_unverified_https_context
-
+ssl._create_default_https_context = ssl._create_unverified_context  # noqa
 LOG = logging.getLogger(__name__)
-
-
-def create_dn_wcard_filter(ucsmsdk, filter_class, filter_value):
-    """ Creates wild card filter object for given class name, and values.
-        :param ucsmsdk:
-        :param filter_class: class name
-            :param filter_value: filter property value
-            :return WcardFilter: WcardFilter object
-        """
-    wcard_filter = ucsmsdk.WcardFilter()
-    wcard_filter.Class = filter_class
-    wcard_filter.Property = "dn"
-    wcard_filter.Value = filter_value
-    return wcard_filter
-
-
-def create_dn_in_filter(ucsmsdk, filter_class, filter_value):
-    """ Creates filter object for given class name, and DN values."""
-    in_filter = ucsmsdk.FilterFilter()
-    in_filter.AddChild(
-        create_dn_wcard_filter(
-            ucsmsdk,
-            filter_class,
-            filter_value))
-    return in_filter
-
-
-def get_resolve_class(handle, class_id,
-                      in_filter, in_heir=False):
-    return handle.ConfigResolveClass(
-        class_id, in_filter,
-        inHierarchical=in_heir)
 
 
 class CiscoUcsmBareMetalRpc(amb.CommonAgentManagerRpcCallBackBase):
@@ -164,14 +124,12 @@ class CiscoUcsmBareMetalManager(amb.CommonAgentManagerBase):
         super(amb.CommonAgentManagerBase, self).__init__()
         self.ucsm_conf = config
         self._ports = defaultdict(_PortInfo)
-        self._ucsmsdk = None
         self._mac_blocks = self._discover_mac_blocks()
         self._discover_devices()
 
     @for_all_hosts
     def get_all(self, class_id, path=None, handle=None):
-        for device in self._get_devices_for_handle(
-                class_id, path, handle=handle):
+        for device in handle.query_classid(class_id=class_id):
             yield device
 
     def _discover_mac_blocks(self, path=None):
@@ -181,10 +139,10 @@ class CiscoUcsmBareMetalManager(amb.CommonAgentManagerBase):
         return blocks
 
     def get_all_mac_blocks(self, path=None):
-        macpool_block_id = self.ucsmsdk.MacpoolBlock.ClassId()
+        macpool_block_id = "MacpoolBlock"
         for ucsm_ip, blocks in self.get_all(macpool_block_id):
             for block in blocks:
-                yield block.From.lower(), block.To.lower(), ucsm_ip
+                yield block.r_from.lower(), block.to.lower(), ucsm_ip
 
     def get_rpc_callbacks(self, context, agent, sg_agent):
         return CiscoUcsmBareMetalRpc(context, agent, sg_agent)
@@ -233,9 +191,8 @@ class CiscoUcsmBareMetalManager(amb.CommonAgentManagerBase):
     def plug_interface(self, network_id, network_segment,
                        device, device_owner):
         LOG.debug("Start {}".format(device))
-        eth_if_class_id = self.ucsmsdk.VnicEtherIf.ClassId()
-        eth_class_id = self.ucsmsdk.VnicEther.ClassId()
         vlan_id = network_segment.segmentation_id
+
         info = self._ports.get(device.lower())
         if not info or not info.ucsm_ip:
             LOG.debug("Unknown device {}".format(device))
@@ -250,57 +207,40 @@ class CiscoUcsmBareMetalManager(amb.CommonAgentManagerBase):
                 return False
             vlan = vlans[0]
 
-            handle.StartTransaction()
-            for eth in handle.GetManagedObject(
-                None, eth_class_id, {
-                    self.ucsmsdk.VnicEther.ADDR: device}):
-                crc = get_resolve_class(
-                    handle, eth_if_class_id, create_dn_in_filter(
-                        self.ucsmsdk, eth_if_class_id, eth.Dn))
-
-                if crc.errorCode != 0:
-                    LOG.error("Could not get ether_ifs for {}".format(eth.Dn))
-                    handle.UndoTransaction()
-                    return False
-
+            filter = '(addr, "{}", type="eq")'.format(device)
+            for eth in handle.query_classid('VnicEther', filter_str=filter):
                 exists = False
                 to_delete = []
-                for eth_if in crc.OutConfigs.GetChild():
-                    if eth_if.Name != vlan.Name:
+                for eth_if in handle.query_children(eth, class_id='vnicEtherIf'):
+                    if eth_if.name != vlan.name:
                         to_delete.append(eth_if)
                     else:
                         exists = True
 
                 if to_delete:
                     LOG.debug("Removing {}".format(
-                        [eth_if.Dn for eth_if in to_delete]))
-                    handle.RemoveManagedObject(inMo=to_delete)
+                        [eth_if.dn for eth_if in to_delete]))
+                    for mo in to_delete:
+                        handle.remove_mo(mo)
+                        pass
 
                 if exists:
-                    LOG.debug("Already bound {}".format(vlan.Name))
+                    LOG.debug("Already bound {}".format(vlan.name))
                 else:
-                    vlan_path = (
-                        eth.Dn + constants.VLAN_PATH_PREFIX + vlan.Name)
-
-                    LOG.debug("Adding {}".format(vlan.Name))
-
-                    handle.AddManagedObject(eth,
-                                            self.ucsmsdk.VnicEtherIf.ClassId(),
-                                            {self.ucsmsdk.VnicEtherIf.DN: vlan_path,
-                                             self.ucsmsdk.VnicEtherIf.NAME: vlan.Name,
-                                             self.ucsmsdk.VnicEtherIf.DEFAULT_NET: "yes"},
-                                            True)
-            handle.CompleteTransaction()
+                    LOG.debug("Adding {}".format(vlan.name))
+                    mo = VnicEtherIf(eth, default_net="yes", name=vlan.name)
+                    handle.add_mo(mo, modify_present=True)
+            handle.commit()
 
         LOG.debug("Done")
         return True
 
     def _get_vlan(self, handle, vlan_id):
-        return handle.GetManagedObject(None, self.ucsmsdk.FabricVlan.ClassId(), {
-            self.ucsmsdk.FabricVlan.ID: vlan_id,
-            self.ucsmsdk.FabricVlan.TRANSPORT: 'ether',
-            self.ucsmsdk.FabricVlan.IF_TYPE: 'virtual',
-            self.ucsmsdk.FabricVlan.TYPE: 'lan'})
+        filter = '(id, "{}", type="eq")'.format(vlan_id)
+        filter += ' and (transport, "ether", type="eq")'
+        filter += ' and (if_type, "virtual", type="eq")'
+        return handle.query_classid(class_id='FabricVlan',
+                                    filter_str=filter)
 
     def setup_arp_spoofing_protection(self, device, device_details):
         pass
@@ -319,12 +259,6 @@ class CiscoUcsmBareMetalManager(amb.CommonAgentManagerBase):
         finally:
             self.ucs_manager_disconnect(handle, ucsm_ip)
 
-    @property
-    def ucsmsdk(self):
-        if not self._ucsmsdk:
-            self._ucsmsdk = self._import_ucsmsdk()
-        return self._ucsmsdk
-
     def ucs_manager_connect(self, ucsm_ip):
         """Connects to a UCS Manager."""
         username, password = self.ucsm_conf.get_credentials_for_ucsm_ip(
@@ -334,9 +268,9 @@ class CiscoUcsmBareMetalManager(amb.CommonAgentManagerBase):
                         'credentials for UCSM %s'), ucsm_ip)
             return None
 
-        handle = self.ucsmsdk.UcsHandle()
         try:
-            handle.Login(ucsm_ip, username, password)
+            handle = UcsHandle(ucsm_ip, username, password)
+            handle.login()
         except Exception as e:
             # Raise a Neutron exception. Include a description of
             # the original  exception.
@@ -351,52 +285,21 @@ class CiscoUcsmBareMetalManager(amb.CommonAgentManagerBase):
         is no longer valid.
         """
         try:
-            handle.Logout()
+            handle.logout()
         except Exception as e:
             # Raise a Neutron exception. Include a description of
             # the original  exception.
             raise cexc.UcsmDisconnectFailed(ucsm_ip=ucsm_ip, exc=e)
 
-    def _import_ucsmsdk(self):
-        """Imports the Ucsm SDK module.
-
-        This module is not installed as part of the normal Neutron
-        distributions. It is imported dynamically in this module so that
-        the import can be mocked, allowing unit testing without requiring
-        the installation of UcsSdk.
-
-        """
-        return importutils.import_module('UcsSdk')
-
     def _discover_devices(self):
+        class_id = "VnicEther"
         for ucsm_ip in self.ucsm_conf.get_all_ucsm_ips():
             vnic_paths = self.ucsm_conf.vnic_paths_dict[ucsm_ip]
             with self.ucsm_connect_disconnect(ucsm_ip) as handle:
                 for vnic_path in vnic_paths:
-                    for mac in self._get_devices(handle, vnic_path):
-                        self._ports[mac.lower()].ucsm_ip = ucsm_ip
-
-    def _get_devices(self, handle, vnic_path):
-        vnic_id = self.ucsmsdk.VnicEther.ClassId()
-        crc = get_resolve_class(
-            handle, vnic_id, create_dn_in_filter(
-                self.ucsmsdk, vnic_id, vnic_path))
-        if crc.errorCode != 0:
-            LOG.debug("Could not resolve vnics with path {}".format(vnic_path))
-        else:
-            for child in crc.OutConfigs.GetChild():
-                if child.Addr != 'derived':
-                    yield child.Addr
-
-    def _get_devices_for_handle(self, class_id, path, handle=None):
-        crc = get_resolve_class(
-            handle, class_id, create_dn_in_filter(
-                self.ucsmsdk, class_id, path))
-        if crc.errorCode != 0:
-            LOG.debug("Could not resolve device with path {}".format(path))
-        else:
-            for child in crc.OutConfigs.GetChild():
-                yield child
+                    filter = '(dn,"{}.*", type="re")'.format(vnic_path)
+                    for vnicEther in handle.query_classid(class_id=class_id, filter_str=filter):
+                        self._ports[vnicEther.addr.lower()].ucsm_ip = ucsm_ip
 
 
 class AgentLoop(ca.CommonAgentLoop):

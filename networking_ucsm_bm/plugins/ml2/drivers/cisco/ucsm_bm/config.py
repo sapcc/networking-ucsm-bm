@@ -18,8 +18,9 @@ import six
 from oslo_config import cfg
 from oslo_log import log as logging
 
-from networking_ucsm_bm._i18n import _
 from networking_ucsm_bm import constants as const
+from networking_ucsm_bm._i18n import _
+from networking_ucsm_bm.plugins.ml2.drivers.cisco.ucsm_bm import multi_config_parser as mcp
 
 LOG = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class UcsmBmConfig(object):
         """Creates a dictionary of all UCS Manager data from config."""
         username = None
         password = None
-        multi_parser = cfg.MultiConfigParser()
+        multi_parser = mcp.MultiConfigParser()
         read_ok = multi_parser.read(cfg.CONF.config_file)
 
         if len(read_ok) != len(cfg.CONF.config_file):
