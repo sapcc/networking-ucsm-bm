@@ -34,6 +34,7 @@ from networking_ucsm_bm._i18n import _
 from networking_ucsm_bm.plugins.ml2.drivers.cisco.ucsm_bm import exceptions as cexc
 from networking_ucsm_bm.plugins.ml2.drivers.cisco.ucsm_bm.config import UcsmBmConfig
 from neutron.common import config as common_config
+from neutron.conf import service as n_service
 from neutron.plugins.ml2.drivers.agent import _agent_manager_base as amb  # noqa
 from neutron.plugins.ml2.drivers.agent import _common_agent as ca  # noqa
 
@@ -327,6 +328,7 @@ class AgentLoop(ca.CommonAgentLoop):
 def main():
     common_config.init(sys.argv[1:])
     common_config.setup_logging()
+    cfg.CONF.register_opts(n_service.RPC_EXTRA_OPTS)
     if profiler:
         profiler.setup(constants.AGENT_BINARY, cfg.CONF.host)
     config = UcsmBmConfig()
